@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ভয়েস ইনপুট - মেস ERP</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Tahoma, sans-serif; background: #12121f; color: #fff; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .box { width: 100%; max-width: 380px; text-align: center; }
+  .mic { width: 84px; height: 84px; border-radius: 50%; margin: 0 auto 14px; display: flex; align-items: center; justify-content: center; font-size: 36px; background: rgba(255,255,255,0.08); border: 2px solid rgba(212,175,55,0.4); }
+  .mic.on { background: #e74c3c; border-color: #e74c3c; animation: pulse 1.1s infinite; }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(231,76,60,0.5); } 50% { box-shadow: 0 0 0 16px rgba(231,76,60,0); } }
+  h2 { font-size: 17px; color: #d4af37; margin-bottom: 10px; }
+  .transcript { min-height: 80px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 12px; font-size: 15px; line-height: 1.6; margin-bottom: 14px; text-align: left; word-break: break-word; }
+  .row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  button { padding: 9px 16px; border-radius: 8px; border: none; cursor: pointer; font-weight: 600; font-size: 13px; }
+  .primary { background: #d4af37; color: #12121f; }
+  .ghost { background: rgba(255,255,255,0.1); color: #fff; }
+  .hint { margin-top: 12px; font-size: 12px; color: rgba(255,255,255,0.55); line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="box">
+  <div id="mic" class="mic">🎤</div>
+  <h2 id="status">মাইক চালু হচ্ছে...</h2>
+  <div id="transcript" class="transcript">বাংলায় প্রশ্ন বলুন...</div>
+  <div class="row">
+    <button id="btnStart" class="primary">🎤 আবার বলুন</button>
+    <button id="btnCopy" class="ghost" style="display:none;">📋 কপি করুন</button>
+    <button id="btnClose" class="ghost">বন্ধ করুন</button>
+  </div>
+  <p id="hint" class="hint">প্রথমবার ব্রাউজার মাইকের অনুমতি চাইলে "Allow / অনুমতি দিন" চাপুন।</p>
+</div>
+
+<script>
+(function () {
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var rec = null, listening = false, finalText = '', sent = false;
+  var micEl = document.getElementById('mic');
+  var statusEl = document.getElementById('status');
+  var transEl = document.getElementById('transcript');
+  var hintEl = document.getElementById('hint');
+  var btnCopy = document.getElementById('btnCopy');
+
+  function post(type, payload) {
+    try {
+      if (window.opener && !window.opener.closed) {
+        var msg = { type: type };
+        for (var k in payload) msg[k] = payload[k];
+        window.opener.postMessage(msg, '*'); // শুধু কথার লেখা যায়, সংবেদনশীল কিছু নয়
+        return true;
+      }
+    } catch (e) { }
+    return false;
+  }
+
+  var ERRORS = {
+    'not-allowed': 'মাইকের অনুমতি দেওয়া হয়নি। ঠিকানা বারের 🔒 আইকনে ক্লিক করে মাইক "Allow/অনুমতি দিন" করুন, তারপর আবার চেষ্টা করুন।',
+    'service-not-allowed': 'এই ব্রাউজারে ভয়েস সেবা চালু নেই। Chrome বা Edge ব্যবহার করুন।',
+    'no-speech': 'কিছু শোনা যায়নি। আবার 🎤 চেপে স্পষ্টভাবে বলুন।',
+    'audio-capture': 'কোনো মাইক্রোফোন পাওয়া যায়নি। মাইক সংযুক্ত আছে কিনা দেখুন।',
+    'network': 'ইন্টারনেট সংযোগে সমস্যা — ভয়েস চেনার জন্য ইন্টারনেট লাগে।',
+    'language-not-supported': 'বাংলা ভাষা এই ব্রাউজারে সাপোর্টেড নয়।'
+  };
+
+  function start() {
+    if (!SR) {
+      statusEl.textContent = 'এই ব্রাউজারে ভয়েস ইনপুট নেই';
+      hintEl.textContent = 'Google Chrome বা Microsoft Edge ব্যবহার করুন।';
+      post('MESS_ERP_VOICE_ERROR', { message: 'এই ব্রাউজারে ভয়েস ইনপুট সাপোর্ট নেই। Chrome বা Edge ব্যবহার করুন।' });
+      return;
+    }
+    if (listening) return;
+    finalText = ''; sent = false;
+    transEl.textContent = '...';
+    btnCopy.style.display = 'none';
+
+    rec = new SR();
+    rec.lang = 'bn-BD';
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+
+    rec.onstart = function () {
+      listening = true;
+      micEl.classList.add('on');
+      statusEl.textContent = 'শুনছি... বলুন';
+    };
+
+    rec.onresult = function (e) {
+      var interim = '', fin = '';
+      for (var i = e.resultIndex; i < e.results.length; i++) {
+        var t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) fin += t; else interim += t;
+      }
+      if (fin) finalText = (finalText + ' ' + fin).trim();
+      var shown = (finalText + ' ' + interim).trim();
+      transEl.textContent = shown || '...';
+      post('MESS_ERP_VOICE_INTERIM', { text: shown });
+    };
+
+    rec.onerror = function (e) {
+      var msg = ERRORS[e.error] || ('ভয়েস ইনপুটে সমস্যা হয়েছে (' + e.error + ')');
+      statusEl.textContent = 'সমস্যা হয়েছে';
+      hintEl.textContent = msg;
+      post('MESS_ERP_VOICE_ERROR', { message: msg });
+    };
+
+    rec.onend = function () {
+      listening = false;
+      micEl.classList.remove('on');
+      if (finalText && !sent) {
+        sent = true;
+        statusEl.textContent = '✅ লেখা হয়েছে';
+        var ok = post('MESS_ERP_VOICE_RESULT', { text: finalText });
+        if (ok) {
+          hintEl.textContent = 'চ্যাটের ইনপুট বক্সে বসে গেছে। এডিট করে পাঠান। এই উইন্ডো বন্ধ হচ্ছে...';
+          setTimeout(function () { window.close(); }, 900);
+        } else {
+          hintEl.textContent = 'মূল অ্যাপের সাথে সংযোগ পাওয়া যায়নি। "কপি করুন" চেপে লেখাটা চ্যাটে পেস্ট করুন।';
+          btnCopy.style.display = 'inline-block';
+        }
+      } else if (!finalText && statusEl.textContent === 'শুনছি... বলুন') {
+        statusEl.textContent = 'কিছু শোনা যায়নি';
+      }
+    };
+
+    try { rec.start(); } catch (err) { }
+  }
+
+  document.getElementById('btnStart').onclick = start;
+  document.getElementById('btnClose').onclick = function () { window.close(); };
+  btnCopy.onclick = function () {
+    try { navigator.clipboard.writeText(finalText); btnCopy.textContent = '✅ কপি হয়েছে'; } catch (e) { }
+  };
+
+  start(); // খোলার সাথে সাথেই শোনা শুরু
+})();
+</script>
+</body>
+</html>
